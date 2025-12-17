@@ -323,18 +323,117 @@ class BasicAgent(Agent):
             return self._random_action()
 
 class NewAgent(Agent):
-    """自定义 Agent 模板（待学生实现）"""
-    
     def __init__(self):
-        pass
+        super().__init__()
+        self.pbounds = {
+            'V0': (0.5, 8.0),
+            'phi': (0.0, 360.0),
+            'theta': (0.0, 90.0),
+            'a': (-0.5, 0.5),
+            'b': (-0.5, 0.5)
+        }
+        self.max_eval_per_move = 12
+        self.policy_type = "FALLBACK"
+        self.model = None
+        self.meta = None
+        try:
+            from utils_state import encode_state, load_meta, normalize_state, action_denorm
+            self._encode_state = encode_state
+            self._load_meta = load_meta
+            self._normalize_state = normalize_state
+            self._action_denorm = action_denorm
+        except Exception:
+            self._encode_state = None
+            self._load_meta = None
+            self._normalize_state = None
+            self._action_denorm = None
+        self.fallback_agent = BasicAgent()
+        models_dir = os.path.join(os.getcwd(), "models")
+        sac_path = os.path.join(models_dir, "sac_policy.pt")
+        bc_path = os.path.join(models_dir, "bc_policy.pt")
+        meta_path = os.path.join(models_dir, "meta.json")
+        try:
+            import torch
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            if os.path.exists(sac_path):
+                self.model = torch.jit.load(sac_path, map_location=device)
+                self.policy_type = "SAC"
+            elif os.path.exists(bc_path):
+                self.model = torch.jit.load(bc_path, map_location=device)
+                self.policy_type = "BC"
+            if self._load_meta is not None:
+                dummy = np.zeros(2 + 15*4 + 2 + 6*2, dtype=np.float32)
+                self.meta = self._load_meta(meta_path, len(dummy))
+        except Exception:
+            self.model = None
+            self.policy_type = "FALLBACK"
+            self.meta = None
     
     def decision(self, balls=None, my_targets=None, table=None):
-        """决策方法
-        
-        参数：
-            observation: (balls, my_targets, table)
-        
-        返回：
-            dict: {'V0', 'phi', 'theta', 'a', 'b'}
-        """
-        return self._random_action()
+        if balls is None or my_targets is None or table is None:
+            print("[NewAgent] 缺少观测，使用随机动作。")
+            return self._random_action()
+        try:
+            if self._encode_state is None:
+                return self.fallback_agent._random_action()
+            state = self._encode_state(balls, my_targets, table)
+            if self.model is not None and self._normalize_state is not None and self._action_denorm is not None and self.meta is not None:
+                import torch
+                x = self._normalize_state(state, self.meta)
+                x_t = torch.from_numpy(x).float().unsqueeze(0)
+                with torch.no_grad():
+                    y = self.model(x_t).cpu().numpy().reshape(-1)
+                action = self._action_denorm(y, self.meta)
+                print(f"[NewAgent] 策略来源: {self.policy_type}")
+            else:
+                print("[NewAgent] 策略来源: FALLBACK")
+                action = self.fallback_agent.decision(balls, my_targets, table)
+            action = self._clip_action(action)
+            action = self._neighborhood_refine(action, balls, my_targets, table)
+            return action
+        except Exception as e:
+            print(f"[NewAgent] 决策异常，回退随机动作。原因: {e}")
+            return self._random_action()
+
+    def _clip_action(self, action):
+        V0 = float(np.clip(float(action.get('V0', 4.0)), self.pbounds['V0'][0], self.pbounds['V0'][1]))
+        phi = float(action.get('phi', 0.0)) % 360.0
+        theta = float(np.clip(float(action.get('theta', 10.0)), self.pbounds['theta'][0], self.pbounds['theta'][1]))
+        a = float(np.clip(float(action.get('a', 0.0)), self.pbounds['a'][0], self.pbounds['a'][1]))
+        b = float(np.clip(float(action.get('b', 0.0)), self.pbounds['b'][0], self.pbounds['b'][1]))
+        return {'V0': V0, 'phi': phi, 'theta': theta, 'a': a, 'b': b}
+
+    def _neighborhood_refine(self, base_action, balls, my_targets, table):
+        try:
+            last_state_snapshot = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
+            best = base_action
+            best_score = self._evaluate_action(best, last_state_snapshot, my_targets, balls, table)
+            rng = np.array([0.4, 6.0, 5.0, 0.08, 0.08], dtype=np.float32)
+            for i in range(self.max_eval_per_move):
+                noise = (np.random.uniform(-1.0, 1.0, size=5) * rng).astype(np.float32)
+                cand = {
+                    'V0': best['V0'] + float(noise[0]),
+                    'phi': best['phi'] + float(noise[1]),
+                    'theta': best['theta'] + float(noise[2]),
+                    'a': best['a'] + float(noise[3]),
+                    'b': best['b'] + float(noise[4]),
+                }
+                cand = self._clip_action(cand)
+                s = self._evaluate_action(cand, last_state_snapshot, my_targets, balls, table)
+                if s > best_score:
+                    best, best_score = cand, s
+            return best
+        except Exception:
+            return base_action
+
+    def _evaluate_action(self, action, last_state_snapshot, my_targets, balls, table):
+        try:
+            sim_balls = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
+            sim_table = copy.deepcopy(table)
+            cue = pt.Cue(cue_ball_id="cue")
+            shot = pt.System(table=sim_table, balls=sim_balls, cue=cue)
+            shot.cue.set_state(V0=action['V0'], phi=action['phi'], theta=action['theta'], a=action['a'], b=action['b'])
+            pt.simulate(shot, inplace=True)
+            return analyze_shot_for_reward(shot=shot, last_state=last_state_snapshot, player_targets=my_targets)
+        except Exception:
+            return -500.0
