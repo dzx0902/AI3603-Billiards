@@ -393,6 +393,7 @@ class NewAgent(Agent):
         self.policy_type = "FALLBACK"
         self.model = None
         self.meta = None
+        self._device = None
         try:
             from utils_state import encode_state, load_meta, normalize_state, action_denorm
             self._encode_state = encode_state
@@ -418,6 +419,12 @@ class NewAgent(Agent):
             elif os.path.exists(bc_path):
                 self.model = torch.jit.load(bc_path, map_location=device)
                 self.policy_type = "BC"
+            if self.model is not None:
+                try:
+                    self.model.eval()
+                except Exception:
+                    pass
+                self._device = device
             if self._load_meta is not None:
                 dummy = np.zeros(2 + 15*4 + 2 + 6*2, dtype=np.float32)
                 self.meta = self._load_meta(meta_path, len(dummy))
@@ -425,6 +432,7 @@ class NewAgent(Agent):
             self.model = None
             self.policy_type = "FALLBACK"
             self.meta = None
+            self._device = None
     
     def decision(self, balls=None, my_targets=None, table=None):
         if balls is None or my_targets is None or table is None:
@@ -438,8 +446,11 @@ class NewAgent(Agent):
                 import torch
                 x = self._normalize_state(state, self.meta)
                 x_t = torch.from_numpy(x).float().unsqueeze(0)
+                if self._device is not None:
+                    x_t = x_t.to(self._device)
                 with torch.no_grad():
-                    y = self.model(x_t).cpu().numpy().reshape(-1)
+                    y_t = self.model(x_t)
+                    y = y_t.detach().cpu().numpy().reshape(-1)
                 action = self._action_denorm(y, self.meta)
                 print(f"[NewAgent] 策略来源: {self.policy_type}")
             else:
