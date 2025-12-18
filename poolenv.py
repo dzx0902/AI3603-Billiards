@@ -521,16 +521,16 @@ if __name__ == '__main__':
         env.take_shot(action)
         
         # 观看当前杆，使用ESC退出
-        # pt.show(env.shot_record[-1], title=f"hit count: {env.hit_count}")
+        pt.show(env.shot_record[-1], title=f"hit count: {env.hit_count}")
         
         done, info = env.get_done()
         if done:
             print("游戏结束.")
             ## 观看整个击球过程，使用ESC依次观看每一杆
-            # for i in range(len(env.shot_record)):
-            #     pt.show(env.shot_record[i], title=f"hit count: {i}")
+            for i in range(len(env.shot_record)):
+                pt.show(env.shot_record[i], title=f"hit count: {i}")
             
             ## 观看整个过程 使用 p 和 n 控制 上一杆/ 下一杆
-            # pt.show(env.shot_record, title=f"all record")
+            pt.show(env.shot_record, title=f"all record")
             break
         

@@ -17,6 +17,7 @@ import os
 from datetime import datetime
 import random
 import signal
+from utils import get_straight_in_all
 # from poolagent.pool import Pool as CuetipEnv, State as CuetipState
 # from poolagent import FunctionAgent
 
@@ -33,7 +34,7 @@ def _timeout_handler(signum, frame):
     """超时信号处理器"""
     raise SimulationTimeoutError("物理模拟超时")
 
-def simulate_with_timeout(shot, timeout=3):
+def simulate_with_timeout(shot, timeout=10):
     """带超时保护的物理模拟
     
     参数：
@@ -328,7 +329,7 @@ class BasicAgent(Agent):
                         shot.cue.set_state(V0=V0, phi=phi, theta=theta, a=a, b=b)
                     
                     # 关键：使用带超时保护的物理模拟（3秒上限）
-                    if not simulate_with_timeout(shot, timeout=3):
+                    if not simulate_with_timeout(shot, timeout=10):
                         return 0  # 超时是物理引擎问题，不惩罚agent
                 except Exception as e:
                     # 模拟失败，给予极大惩罚
@@ -394,4 +395,17 @@ class NewAgent(Agent):
         返回：
             dict: {'V0', 'phi', 'theta', 'a', 'b'}
         """
-        return self._random_action()
+
+        possiblities = get_straight_in_all(balls, my_targets, table)
+
+        print(f"Target of player B:{my_targets}")
+
+        for possiblity in possiblities:
+            if (possiblity['difficulty'] == 0):
+                return possiblity['action']
+        
+        print(possiblities)
+
+        print("random shot")
+
+        return self._random_action() 
