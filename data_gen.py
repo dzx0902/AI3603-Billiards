@@ -5,6 +5,7 @@ import random
 from poolenv import PoolEnv
 from agent import BasicAgent
 from utils_state import encode_state, action_norm, load_meta
+import json
 
 def compute_reward_from_step(step_info, my_targets):
     score = 0.0
@@ -37,6 +38,17 @@ def run_games(n_games, target_cycle, seed):
     dones = []
     next_states = []
     meta = load_meta(None, 2 + 15*4 + 2 + 6*2)
+    stats = {
+        'me_pocket': 0,
+        'enemy_pocket': 0,
+        'white_pocket': 0,
+        'black_pocket_legal': 0,
+        'black_pocket_illegal': 0,
+        'foul_first_hit': 0,
+        'no_pocket_no_rail': 0,
+        'no_hit': 0,
+        'steps': 0
+    }
     for i in range(n_games):
         env.reset(target_ball=target_cycle[i % len(target_cycle)])
         while True:
@@ -54,6 +66,17 @@ def run_games(n_games, target_cycle, seed):
             rewards.append(r)
             dones.append(float(1.0 if done else 0.0))
             next_states.append(s_next)
+            stats['me_pocket'] += len(step_info.get('ME_INTO_POCKET', []))
+            stats['enemy_pocket'] += len(step_info.get('ENEMY_INTO_POCKET', []))
+            stats['white_pocket'] += 1 if step_info.get('WHITE_BALL_INTO_POCKET') else 0
+            if step_info.get('BLACK_BALL_INTO_POCKET'):
+                legal = (len(my_targets) == 1 and my_targets[0] == '8')
+                stats['black_pocket_legal'] += 1 if legal else 0
+                stats['black_pocket_illegal'] += 0 if legal else 1
+            stats['foul_first_hit'] += 1 if step_info.get('FOUL_FIRST_HIT') else 0
+            stats['no_pocket_no_rail'] += 1 if step_info.get('NO_POCKET_NO_RAIL') else 0
+            stats['no_hit'] += 1 if step_info.get('NO_HIT') else 0
+            stats['steps'] += 1
             if done:
                 break
     return {
@@ -62,6 +85,7 @@ def run_games(n_games, target_cycle, seed):
         'rewards': np.asarray(rewards, dtype=np.float32),
         'dones': np.asarray(dones, dtype=np.float32),
         'next_states': np.asarray(next_states, dtype=np.float32),
+        'stats': stats,
     }
 
 def main():
@@ -74,6 +98,9 @@ def main():
     target_cycle = ['solid', 'solid', 'stripe', 'stripe']
     data = run_games(args.games, target_cycle, args.seed)
     np.savez_compressed(args.out, **data)
+    stats_path = os.path.join(os.path.dirname(args.out), 'bc_stats.json')
+    with open(stats_path, 'w', encoding='utf-8') as f:
+        json.dump(data['stats'], f, ensure_ascii=False, indent=2)
 
 if __name__ == '__main__':
     main()
