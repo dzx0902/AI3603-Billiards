@@ -93,11 +93,35 @@ def main():
     parser.add_argument('--out', type=str, default='data/bc_data.npz')
     parser.add_argument('--games', type=int, default=200)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--min_reward', type=float, default=-1e9)
+    parser.add_argument('--positive_ratio', type=float, default=0.5)
     args = parser.parse_args()
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     target_cycle = ['solid', 'solid', 'stripe', 'stripe']
     data = run_games(args.games, target_cycle, args.seed)
-    np.savez_compressed(args.out, **data)
+    states = data['states']
+    actions = data['actions']
+    rewards = data['rewards']
+    dones = data['dones']
+    next_states = data['next_states']
+    pos_idx = np.where(rewards >= max(args.min_reward, 10.0))[0]
+    neg_idx = np.where(rewards < max(args.min_reward, 10.0))[0]
+    # 采样一定比例的正样本与负样本，提升进球样本占比
+    pos_n = len(pos_idx)
+    neg_n = len(neg_idx)
+    if pos_n > 0 and neg_n > 0:
+        total = pos_n + neg_n
+        target_pos = int(total * args.positive_ratio)
+        target_neg = total - target_pos
+        pos_sel = np.random.choice(pos_idx, size=min(target_pos, pos_n), replace=False)
+        neg_sel = np.random.choice(neg_idx, size=min(target_neg, neg_n), replace=False)
+        sel = np.concatenate([pos_sel, neg_sel])
+        states = states[sel]
+        actions = actions[sel]
+        rewards = rewards[sel]
+        dones = dones[sel]
+        next_states = next_states[sel]
+    np.savez_compressed(args.out, states=states, actions=actions, rewards=rewards, dones=dones, next_states=next_states, stats=data['stats'])
     stats_path = os.path.join(os.path.dirname(args.out), 'bc_stats.json')
     with open(stats_path, 'w', encoding='utf-8') as f:
         json.dump(data['stats'], f, ensure_ascii=False, indent=2)
