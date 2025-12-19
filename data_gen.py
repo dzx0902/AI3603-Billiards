@@ -7,6 +7,7 @@ from agent import BasicAgent
 from utils_state import encode_state, action_norm, load_meta
 import json
 import sys
+from sim_pipeline import LRUCache, pipeline_best_action
 
 def compute_reward_from_step(step_info, my_targets):
     score = 0.0
@@ -63,12 +64,28 @@ def run_games(n_games, target_cycle, seed):
     }
     for i in range(n_games):
         env.reset(target_ball=target_cycle[i % len(target_cycle)])
+        cache = LRUCache(10000)
         while True:
             player = env.get_curr_player()
             balls, my_targets, table = env.get_observation(player)
             s = encode_state(balls, my_targets, table)
-            a = expert.decision(balls, my_targets, table)
-            a = sanitize_action(a)
+            base = expert.decision(balls, my_targets, table)
+            base = sanitize_action(base)
+            # deterministic candidate grid around base action
+            grid = []
+            for dv in [0.0, -0.3, 0.3]:
+                for dphi in [0.0, -5.0, 5.0]:
+                    for dth in [0.0, -3.0, 3.0]:
+                        cand = {
+                            'V0': float(base['V0'] + dv),
+                            'phi': float(base['phi'] + dphi),
+                            'theta': float(base['theta'] + dth),
+                            'a': float(base['a']),
+                            'b': float(base['b']),
+                        }
+                        grid.append(sanitize_action(cand))
+            best_a, _ = pipeline_best_action(balls, my_targets, table, grid, K=7, cache=cache, timeout=1.0)
+            a = best_a if best_a is not None else base
             try:
                 step_info = env.take_shot(a)
             except Exception as e:
@@ -103,6 +120,7 @@ def run_games(n_games, target_cycle, seed):
         'dones': np.asarray(dones, dtype=np.float32),
         'next_states': np.asarray(next_states, dtype=np.float32),
         'stats': stats,
+        'cache_stats': cache.stats(),
     }
 
 def main():
