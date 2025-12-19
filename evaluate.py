@@ -23,9 +23,9 @@ set_random_seed(enable=False, seed=42)
 
 env = PoolEnv()
 results = {'AGENT_A_WIN': 0, 'AGENT_B_WIN': 0, 'SAME': 0}
-n_games = 120  # 对战局数 自己测试时可以修改 扩充为120局为了减少随机带来的扰动
+n_games = 40  # 对战局数 自己测试时可以修改 扩充为120局为了减少随机带来的扰动
 
-agent_a, agent_b = BasicAgent(), BasicAgent()
+agent_a, agent_b = BasicAgent(), NewAgent()
 
 players = [agent_a, agent_b]  # 用于切换先后手
 target_ball_choice = ['solid', 'solid', 'stripe', 'stripe']  # 轮换球型

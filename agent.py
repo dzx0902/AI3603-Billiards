@@ -395,17 +395,126 @@ class NewAgent(Agent):
         返回：
             dict: {'V0', 'phi', 'theta', 'a', 'b'}
         """
-
-        possiblities = get_straight_in_all(balls, my_targets, table)
-
-        print(f"Target of player B:{my_targets}")
-
-        for possiblity in possiblities:
-            if (possiblity['difficulty'] == 0):
-                return possiblity['action']
         
-        print(possiblities)
+        if balls is None:
+            print(f"[NewAgent] Agent decision函数未收到balls关键信息，使用随机动作。")
+            return self._random_action()
+        
+        # 保存击球前的状态快照，用于评分对比
+        last_state_snapshot = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
+        
+        # 更新目标球（如果自己的球已全部清空，切换到8号球）
+        remaining_own = [bid for bid in my_targets if balls[bid].state.s != 4]
+        if len(remaining_own) == 0:
+            my_targets = ["8"]
+            print("[NewAgent] 我的目标球已全部清空，自动切换目标为：8号球")
 
-        print("random shot")
+        # 进攻：获取所有可能的直线进球方案
+        possiblities = get_straight_in_all(balls, my_targets, table)
+        print(f"[NewAgent] 目标球: {my_targets}, 找到 {len(possiblities)} 个可能的进攻方案")
+        
+        # 按难度排序（难度越低越优先）
+        ranked_possiblties = sorted(possiblities, key=lambda x: x['difficulty'])
+        
+        # 对每个可能的进攻动作进行实际模拟评估
+        for i, possibility in enumerate(ranked_possiblties):
+            if possibility['difficulty'] >= 100:
+                # 难度太高，跳过后续所有方案（已按难度排序）
+                print(f"[NewAgent] 剩余方案难度均 >= 100，停止评估")
+                break
+            
+            action = possibility['action']
+            
+            # 模拟此动作的实际效果
+            try:
+                # 创建模拟环境（深拷贝避免影响真实状态）
+                sim_balls = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
+                sim_table = copy.deepcopy(table)
+                cue = pt.Cue(cue_ball_id="cue")
+                shot = pt.System(table=sim_table, balls=sim_balls, cue=cue)
+                
+                # 设置球杆参数
+                shot.cue.set_state(
+                    V0=action['V0'],
+                    phi=action['phi'],
+                    theta=action['theta'],
+                    a=action['a'],
+                    b=action['b']
+                )
+                
+                # 使用带超时保护的物理模拟（10秒上限）
+                if not simulate_with_timeout(shot, timeout=10):
+                    print(f"[NewAgent] 方案 {i+1}: 模拟超时，跳过 (球 {possibility['target']} -> 袋 {possibility['pocket']})")
+                    continue
+                
+                # 使用规则引擎评分
+                score = analyze_shot_for_reward(
+                    shot=shot,
+                    last_state=last_state_snapshot,
+                    player_targets=my_targets
+                )
+                
+                print(f"[NewAgent] 方案 {i+1}: 球 {possibility['target']} -> 袋 {possibility['pocket']}, "
+                      f"难度={possibility['difficulty']:.2f}, 模拟得分={score:.2f}")
+                
+                # 判断得分是否理想（>= 40 表示至少进一球且无重大犯规）
+                if score >= 40:
+                    print(f"[NewAgent] ✓ 选择此方案执行 (得分: {score:.2f})")
+                    return action
+                    
+            except Exception as e:
+                print(f"[NewAgent] 方案 {i+1}: 模拟失败，跳过。原因: {e}")
+                continue
+        
+        # 防守：如果所有进攻方案都不理想，执行保守策略
+        print("[NewAgent] 未找到理想的进攻方案（得分 < 40)执行防守动作")
 
-        return self._random_action() 
+        count = 0
+
+        while True:
+            r_phi = 5 * random.randint(0, 71)
+            r_v0 = 1.0 + 0.5 * random.randint(0, 2)
+
+            count += 1
+            if (count > 150):
+                break
+
+            try:
+                # 创建模拟环境（深拷贝避免影响真实状态）
+                sim_balls = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
+                sim_table = copy.deepcopy(table)
+                cue = pt.Cue(cue_ball_id="cue")
+                shot = pt.System(table=sim_table, balls=sim_balls, cue=cue)
+                
+                # 设置球杆参数
+                shot.cue.set_state(
+                    V0=r_v0,
+                    phi=r_phi,
+                    theta=5,
+                    a=0,
+                    b=0
+                )
+                
+                # 使用带超时保护的物理模拟（10秒上限）
+                if not simulate_with_timeout(shot, timeout=10):
+                    print(f"模拟超时，跳过")
+                    continue
+                
+                # 使用规则引擎评分
+                score = analyze_shot_for_reward(
+                    shot=shot,
+                    last_state=last_state_snapshot,
+                    player_targets=my_targets
+                )
+                
+                # 判断防守是否理想（>= 0 表示无重大犯规）
+                if score >= 0:
+                    print(f"[NewAgent] ✓ 选择此方案执行 (得分: {score:.2f})")
+                    return {"V0":r_v0, "phi":r_phi, "theta":5, "a":0, "b":0}
+                    
+            except Exception as e:
+                print(f"[NewAgent] 方案 {i+1}: 模拟失败，跳过。原因: {e}")
+                continue
+
+        print("Choose random shot instead.")
+        return self._random_action()

@@ -59,11 +59,11 @@ def get_straight_in_all(balls=None, my_targets=None, table=None):
     for target in my_targets:
         if balls[target].state.s == 0:
             for pocket_id, pocket in table.pockets.items():
-                decision_list.append(find_straight_in_way(balls, my_targets, table, target, pocket.center))
+                decision_list.append(find_straight_in_way(balls, my_targets, table, target, pocket.center, pocket_id))
 
     if decision_list == []:
         for pocket_id, pocket in table.pockets.items():
-                decision_list.append(find_straight_in_way(balls, my_targets, table, '8', pocket.center))
+                decision_list.append(find_straight_in_way(balls, my_targets, table, '8', pocket.center, pocket_id))
 
     return decision_list
 
@@ -71,6 +71,21 @@ def dist_between(a, b):
     a = np.asarray(a)[:2]
     b = np.asarray(b)[:2]
     return float(np.linalg.norm(a - b))
+
+def cross_cos(cue_pos, target_pos_2d, target_ball_pos_2d, pocket_2d):
+    target_to_pocket = dist_between(target_ball_pos_2d, pocket_2d)
+
+    # cue->target 方向
+    cue_to_target_vec = target_pos_2d - cue_pos
+    cue_to_target_vec = cue_to_target_vec / np.linalg.norm(cue_to_target_vec)
+    # target->pocket 方向
+    target_to_pocket_vec = pocket_2d - target_ball_pos_2d
+    target_to_pocket_vec = target_to_pocket_vec / np.linalg.norm(target_to_pocket_vec)
+    # 夹角余弦
+    cos_alpha = np.dot(cue_to_target_vec, target_to_pocket_vec)
+    cos_alpha = np.clip(cos_alpha, 0.01, 1.0)  # 防止极端情况
+
+    return cos_alpha
 
 def min_v0(cue_pos, target_pos_2d, target_ball_pos_2d, pocket_2d):
 
@@ -97,23 +112,27 @@ def min_v0(cue_pos, target_pos_2d, target_ball_pos_2d, pocket_2d):
 
     return v0_th
 
-def find_straight_in_way(balls, my_targets, table, target, pocket_center):
+def find_straight_in_way(balls, my_targets, table, target, pocket_center, pocket_id):
 
     target_ball_pos = balls[target].state.rvw[0]
-    target_to_pocket = dist_between(target_ball_pos, pocket_center)
-    target_pos = target_ball_pos + (target_ball_pos - pocket_center) * 2 * ball_radius / target_to_pocket
+    dist_targetball_to_pocket = dist_between(target_ball_pos, pocket_center)
+    target_pos = target_ball_pos + (target_ball_pos - pocket_center) * 2 * ball_radius / dist_targetball_to_pocket
+    dist_cue_to_target = dist_between(balls['cue'].state.rvw[0], target_pos)
+
     target_pos[2] = target_ball_pos[2] # z remains
 
-    trace = target_pos - balls['cue'].state.rvw[0]
+    trace_cue_to_target = target_pos - balls['cue'].state.rvw[0]
+    trace_targetball_to_pocket = pocket_center - target_ball_pos
 
     action = {}
     action['a'] = 0
     action['b'] = 0
-    action['phi'] = math.degrees(math.atan2(trace[1], trace[0])) % 360
+    action['phi'] = math.degrees(math.atan2(trace_cue_to_target[1], trace_cue_to_target[0])) % 360
 
     action['theta'] = 5
 
-    v0_th = min_v0(balls['cue'].state.rvw[0][:2], target_pos[:2], target_ball_pos[:2], pocket_center[:2])
+    v0_ratio = 0.2
+    v0_th = min_v0(balls['cue'].state.rvw[0][:2], target_pos[:2], target_ball_pos[:2], pocket_center[:2]) * v0_ratio
     v0_pr = 2
     while (v0_pr <= v0_th):
         v0_pr += 0.5
@@ -123,23 +142,46 @@ def find_straight_in_way(balls, my_targets, table, target, pocket_center):
 
     difficulty = 0
 
-    # 球路被阻挡
+    # 球路被阻挡 cue_to_target
 
     hit_message = ""
-
     hit_ratio = 0.02
     for ball_id, ball in balls.items():
         if (ball.state.s == 0) and (ball_id != 'cue'):
-            if hit_in_trace(ball.state.rvw[0][:2], (target_pos - hit_ratio * trace)[:2], balls['cue'].state.rvw[0][:2]):
+            if hit_in_trace(ball.state.rvw[0][:2], (target_pos - hit_ratio * trace_cue_to_target)[:2], balls['cue'].state.rvw[0][:2]):
                 hit_message = f"When try to hit ball {target} cue ball hit ball {ball_id} midway."
-                difficulty = 1
+                difficulty = 100
+                break
+    
+    # 球路被阻挡 targetball_to_pocket
+
+    for ball_id, ball in balls.items():
+        if (ball.state.s == 0) and (ball_id != target):
+            if hit_in_trace(ball.state.rvw[0][:2], (pocket_center - hit_ratio * trace_targetball_to_pocket)[:2], target_ball_pos[:2]):
+                difficulty = 100
                 break
 
     # 目标位置不合法
     if (target_pos[0] < ball_radius) or (target_pos[1] < ball_radius) or (target_pos[0] + ball_radius > table.w) or (target_pos[1] + ball_radius > table.l):
-        difficulty = 1 
+        difficulty = 100
 
-    return {'action':action, 'difficulty':difficulty, 'target':target, 'hit_message':hit_message}
+    # difficulty和dist正相关，和击球角的余弦值正相关
+    # Limit: dist_total = 1.5, cos = 0.7 此时大概difficulty = 1
+
+    if (difficulty == 0):
+        beta = 3
+        dist_ratio = 1.5
+        angle_ratio = 1.3
+        difficulty = (dist_targetball_to_pocket + dist_cue_to_target) / dist_ratio
+        diificulty = difficulty * (1 - angle_ratio * abs(cross_cos(balls['cue'].state.rvw[0][:2], target_pos[:2], target_ball_pos[:2], pocket_center[:2])))
+
+        # 中袋角度修正
+        if (pocket_id in ['lc', 'rc']):
+            difficulty = difficulty / (1 - abs(trace_targetball_to_pocket[1] / math.sqrt(trace_targetball_to_pocket[0] ** 2 + trace_targetball_to_pocket[1] ** 2)))
+        if (difficulty > 100):
+            difficulty = 100
+
+    return {'action':action, 'difficulty':difficulty, 'target':target, 'hit_message':hit_message, 'pocket':pocket_id}
 
 def hit_in_trace(hit_ball, dest_pos, start_pos):
 
