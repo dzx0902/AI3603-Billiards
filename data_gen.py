@@ -6,6 +6,7 @@ from poolenv import PoolEnv
 from agent import BasicAgent
 from utils_state import encode_state, action_norm, load_meta
 import json
+import sys
 
 def compute_reward_from_step(step_info, my_targets):
     score = 0.0
@@ -26,6 +27,17 @@ def compute_reward_from_step(step_info, my_targets):
     if score == 0.0 and not step_info.get('WHITE_BALL_INTO_POCKET', False) and not step_info.get('BLACK_BALL_INTO_POCKET', False) and not step_info.get('FOUL_FIRST_HIT', False) and not step_info.get('NO_POCKET_NO_RAIL', False):
         score = 10.0
     return score
+
+def sanitize_action(a):
+    try:
+        a['V0'] = float(np.clip(a['V0'], 0.7, 7.8))
+        a['phi'] = float(a['phi'] % 360.0)
+        a['theta'] = float(np.clip(a['theta'], 0.0, 75.0))
+        a['a'] = float(np.clip(a['a'], -0.45, 0.45))
+        a['b'] = float(np.clip(a['b'], -0.45, 0.45))
+    except Exception:
+        pass
+    return a
 
 def run_games(n_games, target_cycle, seed):
     random.seed(seed)
@@ -56,7 +68,12 @@ def run_games(n_games, target_cycle, seed):
             balls, my_targets, table = env.get_observation(player)
             s = encode_state(balls, my_targets, table)
             a = expert.decision(balls, my_targets, table)
-            step_info = env.take_shot(a)
+            a = sanitize_action(a)
+            try:
+                step_info = env.take_shot(a)
+            except Exception as e:
+                print(f"[data_gen] simulate error: {e}", file=sys.stderr)
+                break
             r = compute_reward_from_step(step_info, my_targets)
             done, info = env.get_done()
             balls2 = step_info['BALLS']
