@@ -22,8 +22,7 @@ import os
 from datetime import datetime
 import random
 
-from agent import Agent, BasicAgent, NewAgent
-
+from agents import Agent, BasicAgent, BasicAgentPro, NewAgent
 
 def collect_ball_states(shot):
     """收集球状态信息
@@ -507,7 +506,7 @@ if __name__ == '__main__':
     # 初始化任务环境
     env = PoolEnv()
 
-    agent_a, agent_b = BasicAgent(), NewAgent()
+    agent_a, agent_b = BasicAgentPro(), NewAgent()
 
     env.reset(target_ball='solid') # 指定player_a打什么球
     while True:
