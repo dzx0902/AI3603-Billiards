@@ -249,6 +249,10 @@ A:
 
 A: 在交我算平台下（同硬件平台），单局时长不超过3分钟，可以近似通过完成evaluate的120局不超过6个小时来计算。
 
+**Q6: basicagent和basicagent_pro有什么关系，我们到底按照哪个对手来？**
+
+A: basicagent_pro是basicagent的升级版，当你的agent对basicagent的胜率超过88%时，推荐附上pro的对打分数。
+
 ---
 
 **加油！🎱🏆**
