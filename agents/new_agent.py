@@ -115,45 +115,48 @@ def analyze_shot_for_reward(shot: pt.System, last_state: dict, player_targets: l
 
 class NewAgent(Agent):
     """
-    强化版 NewAgent：
-    - 进攻候选：straight-in + cut(ghost-ball)
-    - 选择策略：仿真评估后取 eval 最大，而不是第一个>=阈值
-    - eval：规则分 + 连攻机会 - 送球风险 + 清台进度 - 白球近袋风险
-    - 防守：角度扫描×力度，挑最不送球的一杆
+    均衡版 NewAgent（胜率↑，速度损失不大）：
+    - 候选：straight-in + cut(ghost-ball)
+    - 进攻：只仿真少量 TopK（默认 6）
+    - eval：规则分 +（必要时）局面分（连攻/不送球）+ 清台进度 - 白球近袋风险
+    - 防守：不再 0..360 全扫描；改为“定向少量候选 + 少量随机扰动”，仿真 ~18-27 次
     """
 
     def __init__(self):
         super().__init__()
 
-        # -------- 基本参数 --------
+        # ---------- 仿真 ----------
         self.SIM_TIMEOUT = 10
 
-        # 进攻候选筛选
-        self.TOPK_ATTACK = 14
-        self.DIFFICULTY_MARGIN = 35.0
+        # ---------- 进攻搜索规模（决定速度的关键） ----------
+        self.TOPK_ATTACK = 6              # ✅ 少量仿真
+        self.DIFFICULTY_MARGIN = 20.0     # ✅ 更窄窗口减少候选
 
-        # 局面评估权重
+        # ---------- 局面评估权重 ----------
         self.W_MY_NEXT = 0.8
-        self.W_OPP_NEXT = 1.7
+        self.W_OPP_NEXT = 1.6
         self.MY_EASY_REF = 85.0
         self.OPP_EASY_REF = 65.0
 
         self.W_CLEAR_PROGRESS = 18.0
-        self.W_CUE_NEAR_POCKET = 35.0
+        self.W_CUE_NEAR_POCKET = 25.0     # 略降，避免过度牺牲进攻走位
 
-        self.ATTACK_MIN_ACCEPT = 30.0
+        # ---------- 剪枝：哪些情况下才计算“下一杆机会”（省时） ----------
+        self.EVAL_LOOKAHEAD_BASE_TH = 20  # base>=20 才算局面项（可调：越大越快）
+        self.ATTACK_MIN_ACCEPT = 25.0
 
-        # 防守扫描参数
-        self.DEFENSE_ANGLE_STEP = 10
-        self.DEFENSE_V_CHOICES = [0.7, 1.0, 1.3, 1.6, 2.0]
+        # ---------- 防守：少量定向候选（很省时） ----------
+        self.DEFENSE_N_DIR = 7            # 生成7个方向
+        self.DEFENSE_V_CHOICES = [0.9, 1.4, 1.9]  # 3档力度
         self.DEFENSE_THETA = 5.0
+        self.DEFENSE_JITTER_DEG = 6.0     # 每个方向加扰动，避免死板
 
-        # 几何近似（切球/挡球）
-        self.BALL_R = 0.028575     # 如果你们球尺度不同可改
+        # ---------- 几何近似 ----------
+        self.BALL_R = 0.028575
         self.CLEARANCE = 0.002
         self.CUE_NEAR_POCKET_DIST = 0.10
 
-    # ---------- 通用：取球位置 ----------
+    # ------------------ 基础工具：位置/袋口 ------------------
     def _pos2(self, ball):
         st = getattr(ball, "state", ball)
         for key in ("r", "xyz", "pos", "position", "p"):
@@ -166,7 +169,6 @@ class NewAgent(Agent):
             return np.array([float(x), float(y)], dtype=np.float64)
         raise AttributeError("Cannot find ball position fields (state.r/xyz/pos/position/p or state.x/y).")
 
-    # ---------- 通用：取袋口位置 ----------
     def _get_pockets2(self, table):
         candidates = []
         if hasattr(table, "pockets"):
@@ -261,7 +263,7 @@ class NewAgent(Agent):
                 return False
         return True
 
-    # ---------- 新增：切球候选（ghost-ball） ----------
+    # ------------------ 切球候选（ghost-ball） ------------------
     def _gen_cut_candidates(self, balls, my_targets, table):
         out = []
         try:
@@ -283,10 +285,8 @@ class NewAgent(Agent):
                 u = d / n
                 ghost = tpos - u * (2.0 * self.BALL_R)
 
-                # target->pocket clear
                 if not self._segment_clear(tpos, pk, balls, ignore_ids={tid, "cue"}, clearance=self.CLEARANCE):
                     continue
-                # cue->ghost clear
                 if not self._segment_clear(cue_p, ghost, balls, ignore_ids={tid, "cue"}, clearance=self.CLEARANCE):
                     continue
 
@@ -296,10 +296,10 @@ class NewAgent(Agent):
                     continue
 
                 phi = (math.degrees(math.atan2(aim[1], aim[0])) + 360.0) % 360.0
-                V0 = float(np.clip(1.0 + 0.7 * dist, 0.8, 3.0))
+                V0 = float(np.clip(1.0 + 0.65 * dist, 0.8, 3.0))
 
                 dp = float(np.linalg.norm(pk - tpos))
-                difficulty = 18.0 + 8.0 * dist + 3.0 * dp
+                difficulty = 18.0 + 7.0 * dist + 2.5 * dp  # 略“乐观”，让它更愿意尝试切球
 
                 out.append({
                     "difficulty": difficulty,
@@ -310,6 +310,7 @@ class NewAgent(Agent):
                 })
         return out
 
+    # ------------------ 仿真封装 ------------------
     def _simulate_action(self, balls, table, action):
         sim_balls = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
         sim_table = copy.deepcopy(table)
@@ -323,17 +324,14 @@ class NewAgent(Agent):
             a=float(action['a']),
             b=float(action['b'])
         )
-
         ok = simulate_with_timeout(shot, timeout=self.SIM_TIMEOUT)
         return ok, shot
 
+    # ------------------ 评估（带剪枝） ------------------
     def _evaluate_shot(self, shot: pt.System, last_state_snapshot: dict, my_targets: list, my_before_left: int):
-        base = analyze_shot_for_reward(
-            shot=shot,
-            last_state=last_state_snapshot,
-            player_targets=my_targets
-        )
+        base = analyze_shot_for_reward(shot=shot, last_state=last_state_snapshot, player_targets=my_targets)
 
+        # 极差直接返回（省时）
         if base <= -120:
             return base
 
@@ -341,6 +339,17 @@ class NewAgent(Agent):
 
         my_left_after = self._count_remaining(after_balls, my_targets)
         my_after_targets = ['8'] if (my_targets != ['8'] and my_left_after == 0) else my_targets
+
+        # 清台进度：很便宜但很有效
+        progress = float(my_before_left - my_left_after)
+        prog_term = self.W_CLEAR_PROGRESS * progress
+
+        # 白球近袋风险：便宜
+        cue_pen = self._cue_near_pocket_penalty(after_balls, shot.table)
+
+        # ✅ 剪枝：只有 base 足够好才计算“下一杆机会”（贵）
+        if base < self.EVAL_LOOKAHEAD_BASE_TH:
+            return base + prog_term - cue_pen
 
         opp_targets = self._infer_opp_targets(after_balls, my_after_targets)
 
@@ -356,25 +365,97 @@ class NewAgent(Agent):
         my_term = self.W_MY_NEXT * self._easy_score(my_min_d, self.MY_EASY_REF)
         opp_term = self.W_OPP_NEXT * self._easy_score(opp_min_d, self.OPP_EASY_REF)
 
-        progress = float(my_before_left - my_left_after)
-        prog_term = self.W_CLEAR_PROGRESS * progress
-
-        cue_pen = self._cue_near_pocket_penalty(after_balls, shot.table)
-
         return base + my_term - opp_term + prog_term - cue_pen
 
-    # ================== 你要的：直接修改后的 decision ==================
+    # ------------------ 防守：定向少量候选 ------------------
+    def _gen_defense_dirs(self, balls, table):
+        """
+        生成少量“有目的”的防守方向（phi 列表）：
+        - 指向每个袋口（把白球推离袋口/控制路线）
+        - 指向几个随机方向（兜底）
+        - 指向球群中心（制造拥堵）
+        """
+        dirs = []
+        try:
+            cue_p = self._pos2(balls["cue"])
+            pockets = self._get_pockets2(table)
+        except Exception:
+            return [float(5 * random.randint(0, 71)) for _ in range(self.DEFENSE_N_DIR)]
+
+        # 1) 指向袋口的反方向（让白球远离袋口更常见）
+        # 用“cue -> pocket”的方向，加180度当作“远离袋口”
+        for pk in pockets[:4]:  # 取前4个袋口就够了（省时）
+            v = pk - cue_p
+            if float(np.linalg.norm(v)) < 1e-6:
+                continue
+            phi_to = (math.degrees(math.atan2(v[1], v[0])) + 360.0) % 360.0
+            dirs.append((phi_to + 180.0) % 360.0)
+
+        # 2) 指向球群中心（制造复杂局面）
+        pts = []
+        for bid, b in balls.items():
+            if bid in ("cue",) or b.state.s == 4:
+                continue
+            try:
+                pts.append(self._pos2(b))
+            except Exception:
+                pass
+        if pts:
+            center = np.mean(np.stack(pts, axis=0), axis=0)
+            v = center - cue_p
+            if float(np.linalg.norm(v)) > 1e-6:
+                dirs.append((math.degrees(math.atan2(v[1], v[0])) + 360.0) % 360.0)
+
+        # 3) 少量随机兜底
+        while len(dirs) < self.DEFENSE_N_DIR:
+            dirs.append(float(5 * random.randint(0, 71)))
+
+        # 去重+截断
+        uniq = []
+        for d in dirs:
+            if all(abs(((d - u + 180) % 360) - 180) > 8 for u in uniq):
+                uniq.append(d)
+        return uniq[:self.DEFENSE_N_DIR]
+
+    def _defense_action(self, balls, my_targets, table, last_state_snapshot, my_before_left):
+        best_action = None
+        best_score = -1e18
+
+        dirs = self._gen_defense_dirs(balls, table)
+
+        for base_phi in dirs:
+            for _ in range(2):  # 每个方向两次扰动
+                phi = float((base_phi + random.uniform(-self.DEFENSE_JITTER_DEG, self.DEFENSE_JITTER_DEG)) % 360.0)
+                for V0 in self.DEFENSE_V_CHOICES:
+                    action = {"V0": float(V0), "phi": phi, "theta": float(self.DEFENSE_THETA), "a": 0.0, "b": 0.0}
+                    try:
+                        ok, shot = self._simulate_action(balls, table, action)
+                        if not ok:
+                            continue
+                        eval_score = self._evaluate_shot(shot, last_state_snapshot, my_targets, my_before_left)
+                        if eval_score > best_score:
+                            best_score = eval_score
+                            best_action = action
+                    except Exception:
+                        continue
+
+        if best_action is not None:
+            print(f"[NewAgent] ✓ DEFENSE eval={best_score:.2f} V0={best_action['V0']:.2f} phi={best_action['phi']:.1f}")
+            return best_action
+
+        return self._random_action()
+
+    # ------------------ 主决策 ------------------
     def decision(self, balls=None, my_targets=None, table=None):
         if balls is None:
-            print("[NewAgent] Agent decision函数未收到balls关键信息，使用随机动作。")
             return self._random_action()
 
         last_state_snapshot = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
 
+        # 清台 -> 打8
         remaining_own = [bid for bid in my_targets if balls[bid].state.s != 4]
         if len(remaining_own) == 0:
             my_targets = ["8"]
-            print("[NewAgent] 我的目标球已全部清空，自动切换目标为：8号球")
 
         my_before_left = self._count_remaining(balls, my_targets)
 
@@ -384,78 +465,33 @@ class NewAgent(Agent):
         except Exception:
             straight_poss = []
         cut_poss = self._gen_cut_candidates(balls, my_targets, table)
-
         all_poss = list(straight_poss) + list(cut_poss)
-        print(f"[NewAgent] 目标球: {my_targets}, straight={len(straight_poss)}, cut={len(cut_poss)}, total={len(all_poss)}")
 
         if not all_poss:
-            print("[NewAgent] 没有进攻候选，转防守。")
             return self._defense_action(balls, my_targets, table, last_state_snapshot, my_before_left)
 
         ranked = sorted(all_poss, key=lambda x: float(x.get("difficulty", 1e9)))
         min_d = float(ranked[0].get("difficulty", 1e9))
-
         filtered = [p for p in ranked if float(p.get("difficulty", 1e9)) <= (min_d + self.DIFFICULTY_MARGIN)]
         candidates = filtered[:self.TOPK_ATTACK]
 
         best_action = None
         best_score = -1e18
-        best_meta = None
 
-        for i, p in enumerate(candidates, 1):
+        for p in candidates:
             action = p["action"]
             try:
                 ok, shot = self._simulate_action(balls, table, action)
                 if not ok:
                     continue
-
                 eval_score = self._evaluate_shot(shot, last_state_snapshot, my_targets, my_before_left)
-                print(f"[NewAgent] cand{i:02d} type={p.get('type','straight'):>7} "
-                      f"ball {p.get('target')} -> pocket {p.get('pocket')} "
-                      f"d={float(p.get('difficulty',0)):.2f} eval={eval_score:.2f}")
-
                 if eval_score > best_score:
                     best_score = eval_score
                     best_action = action
-                    best_meta = p
-
-                if best_score >= 160:
-                    break
-
-            except Exception as e:
-                print(f"[NewAgent] cand{i:02d} 模拟失败，跳过。原因: {e}")
+            except Exception:
                 continue
 
         if best_action is not None and best_score >= self.ATTACK_MIN_ACCEPT:
-            print(f"[NewAgent] ✓ 选择最佳进攻 (eval={best_score:.2f}, type={best_meta.get('type','?')})")
             return best_action
 
-        print(f"[NewAgent] 最佳进攻不足够好 (best_eval={best_score:.2f})，转防守。")
         return self._defense_action(balls, my_targets, table, last_state_snapshot, my_before_left)
-
-    # ---------- 防守：角度扫描×力度，选eval最大 ----------
-    def _defense_action(self, balls, my_targets, table, last_state_snapshot, my_before_left):
-        best_action = None
-        best_score = -1e18
-
-        for phi in range(0, 360, self.DEFENSE_ANGLE_STEP):
-            phi_jitter = float(phi) + random.uniform(-2.0, 2.0)
-            for V0 in self.DEFENSE_V_CHOICES:
-                action = {"V0": float(V0), "phi": float(phi_jitter), "theta": float(self.DEFENSE_THETA), "a": 0.0, "b": 0.0}
-                try:
-                    ok, shot = self._simulate_action(balls, table, action)
-                    if not ok:
-                        continue
-                    eval_score = self._evaluate_shot(shot, last_state_snapshot, my_targets, my_before_left)
-                    if eval_score > best_score:
-                        best_score = eval_score
-                        best_action = action
-                except Exception:
-                    continue
-
-        if best_action is not None:
-            print(f"[NewAgent] ✓ 选择最佳防守 (eval={best_score:.2f}) V0={best_action['V0']:.2f}, phi={best_action['phi']:.1f}")
-            return best_action
-
-        print("[NewAgent] 防守失败，随机出杆。")
-        return self._random_action()
